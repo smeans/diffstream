@@ -4,6 +4,14 @@
 
 package diffstream
 
+import "errors"
+
+func assert(f bool, m string) {
+	if !f {
+		panic(errors.New(m))
+	}
+}
+
 func nonZero[T comparable](s []T) bool {
 	var z T
 
@@ -14,6 +22,10 @@ func nonZero[T comparable](s []T) bool {
 	}
 
 	return false
+}
+
+func isZero[T comparable](s []T) bool {
+	return !nonZero(s)
 }
 
 func findElement[T comparable](s []T, v T) int {

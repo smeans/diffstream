@@ -45,6 +45,10 @@ func (ck *DSChunk) PeekRune(p int) (cb int, r rune) {
 	}
 }
 
+func (ck *DSChunk) IsLocked() bool {
+	return nonZero(ck.ChannelMask.Data(false))
+}
+
 type DSChannel struct {
 	Parent     *DiffStream
 	ChannelNum int
@@ -114,6 +118,7 @@ func (ds *DiffStream) dumpChunks() string {
 }
 
 func (ds *DiffStream) splitChunk(lck *DSChunk, pos int, iss []*DSChunk) (rck *DSChunk) {
+	assert(pos < lck.Builder.Len(), "attempt to split chunk at end")
 	log.Debugf("splitting chunk %v: pos: %v iss: %v", lck, pos, iss)
 	rck = &DSChunk{
 		ChannelMask: bitmap.New(ds.ChannelCount()),
@@ -141,6 +146,11 @@ func (ds *DiffStream) splitChunk(lck *DSChunk, pos int, iss []*DSChunk) (rck *DS
 
 			// this channel refers to the right side of the
 			// chunk to be split
+
+			// first, exit the old chunk
+			ch.Chunk.ChannelMask.Set(ch.ChannelNum, true)
+
+			// now, move to the right side chunk
 			ch.Chunk = rck
 			ch.Pos -= pos
 		}
@@ -151,8 +161,9 @@ func (ds *DiffStream) splitChunk(lck *DSChunk, pos int, iss []*DSChunk) (rck *DS
 		}
 		ncs = append(ncs, rck)
 		ncs = append(ncs, ds.chunks[ick+1:]...)
-		log.Debugf("pre split chunks: %+v\npost split chunks: %+v", ds.chunks, ncs)
+		log.Debugf("pre split chunks: %+v", ds.dumpChunks())
 		ds.chunks = ncs
+		log.Debugf("post split chunks: %+v", ds.dumpChunks())
 	}
 
 	return rck
@@ -215,13 +226,26 @@ func (ch *DSChannel) consumeRune(r rune) {
 	}
 
 	log.Debugf("ch %d: %v", ch.ChannelNum, ds.dumpChunks())
-	log.Debugf("ch %d: not-happy %v", ch.ChannelNum, ch)
+	log.Debugf("ch %d: not-happy %v: %s", ch.ChannelNum, ch, string(r))
 
 	if nrck != nil {
-		// there's a matching downstream rune
-		log.Debugf("matching downstream: %v (%v)", nrck, nrp)
+		// there's a matching downstream rune in a chunk
+		// which might actually be this chunk
 
-		ch.exitChunk(nil)
+		log.Debugf("matching downstream: %v (%v)", nrck, nrp)
+		log.Debugf("chunks: %v", ds.dumpChunks())
+		lck, rck := ch.exitChunk(nil)
+
+		if nrck == lck {
+			// we need to re-find the rune because
+			// we split it out from the
+			// current chunk into a new chunk
+			ch.Chunk = rck
+			ch.Pos = 0
+			nrck, nrp = ch.findNextRunePos(r)
+		}
+
+		log.Debugf("nrck: %v nrp: %v", nrck, nrp)
 
 		if nrp == 0 {
 			// the match is at the start of the chunk
@@ -234,7 +258,12 @@ func (ch *DSChannel) consumeRune(r rune) {
 		} else {
 			ch.Chunk = ds.splitChunk(nrck, nrp, nil)
 		}
-		ch.Pos = 0
+
+		cb, nr = ch.Chunk.PeekRune(0)
+
+		assert(nr == r, "chunk/rune mismatch")
+
+		ch.Pos = cb
 
 		return
 	}
@@ -277,11 +306,13 @@ func (ch *DSChannel) findNextRunePos(r rune) (nrck *DSChunk, nrp int) {
 // Safely closes out this channel's relationship with
 // its current chunk.
 func (ch *DSChannel) exitChunk(iss []*DSChunk) (lck *DSChunk, rck *DSChunk) {
+	ds := ch.Parent
+	log.Debugf("exiting chunk %v (%d)", ch.Chunk, ch.Pos)
 	lck = ch.Chunk
 
 	if !ch.EOC() {
 		// we're *not* at the end, so we need to split
-		rck = ch.Parent.splitChunk(ch.Chunk, ch.Pos, iss)
+		rck = ds.splitChunk(ch.Chunk, ch.Pos, iss)
 	}
 
 	lck.ChannelMask.Set(ch.ChannelNum, true)
@@ -300,6 +331,16 @@ func (ds *DiffStream) WriteRune(ch *DSChannel, r rune) {
 	ch.consumeRune(r)
 }
 
+// Write a string to the given channel.
+func (ds *DiffStream) WriteString(ch *DSChannel, s string) {
+	ds.lock.Lock()
+	defer ds.lock.Unlock()
+
+	for _, r := range s {
+		ch.consumeRune(r)
+	}
+}
+
 // Write a single rune to the given channel.
 func (ch *DSChannel) WriteRune(r rune) (n int, err error) {
 	ch.Parent.WriteRune(ch, r)
@@ -309,9 +350,7 @@ func (ch *DSChannel) WriteRune(r rune) (n int, err error) {
 
 // Write a string rune-by-rune to the given channel.
 func (ch *DSChannel) WriteString(s string) (n int, err error) {
-	for _, r := range s {
-		ch.Parent.WriteRune(ch, r)
-	}
+	ch.Parent.WriteString(ch, s)
 
 	return len(s), nil
 }
