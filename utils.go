@@ -4,11 +4,16 @@
 
 package diffstream
 
-import "errors"
+import (
+	"errors"
+	"strings"
 
-func assert(f bool, m string) {
+	"github.com/boljen/go-bitmap"
+)
+
+func assert(f bool) {
 	if !f {
-		panic(errors.New(m))
+		panic(errors.New("assertion failed"))
 	}
 }
 
@@ -56,4 +61,41 @@ func visitSlice[T any](s []T, vfn func(v T) bool) {
 			break
 		}
 	}
+}
+
+func insertElement[T any](s []T, i int, v T) []T {
+	if len(s) == i {
+		return append(s, v)
+	}
+
+	s = append(s[:i+1], s[i:]...)
+	s[i] = v
+
+	return s
+}
+
+func insertSlice[T any](s []T, i int, v []T) []T {
+	for vi, vv := range v {
+		s = insertElement(s, i+vi, vv)
+	}
+
+	return s
+}
+
+func dumpBitmap(b *bitmap.Bitmap) string {
+	var sb strings.Builder
+
+	for i := b.Len() - 1; i >= 0; i-- {
+		if b.Get(i) {
+			sb.WriteRune('1')
+		} else {
+			sb.WriteRune('0')
+		}
+
+		if i > 0 {
+			sb.WriteRune(' ')
+		}
+	}
+
+	return sb.String()
 }

@@ -12,16 +12,20 @@ import (
 	"sync"
 
 	"github.com/boljen/go-bitmap"
-	"github.com/labstack/gommon/log"
 )
 
 type DSChunk struct {
 	ChannelMask bitmap.Bitmap
 	Builder     strings.Builder
+	locked      bool
 }
 
 func (ck *DSChunk) String() string {
 	return ck.Builder.String()
+}
+
+func (ck *DSChunk) Format(f fmt.State, verb rune) {
+	f.Write([]byte(ck.String()))
 }
 
 func (ck *DSChunk) PeekRune(p int) (cb int, r rune) {
@@ -46,7 +50,22 @@ func (ck *DSChunk) PeekRune(p int) (cb int, r rune) {
 }
 
 func (ck *DSChunk) IsLocked() bool {
-	return nonZero(ck.ChannelMask.Data(false))
+	return ck.locked
+}
+
+func (ck *DSChunk) Exit(c int) {
+	ck.ChannelMask.Set(c, true)
+	ck.locked = true
+}
+
+func (ck *DSChunk) WriteRune(r rune) (n int, err error) {
+	assert(!ck.IsLocked())
+	return ck.Builder.WriteRune(r)
+}
+
+func (ck *DSChunk) WriteString(s string) (n int, err error) {
+	assert(!ck.IsLocked())
+	return ck.Builder.WriteString(s)
 }
 
 type DSChannel struct {
@@ -89,8 +108,6 @@ func New(cc int) (ds *DiffStream) {
 
 // Allocate a new chunk appropriate for this stream.
 func (ds *DiffStream) NewChunk(s string) (ck *DSChunk) {
-	log.Debugf("NewChunk: %v", ds.dumpChunks())
-
 	ck = &DSChunk{
 		ChannelMask: bitmap.New(ds.ChannelCount()),
 	}
@@ -111,19 +128,40 @@ func (ds *DiffStream) dumpChunks() string {
 	var sb strings.Builder
 
 	for _, ck := range ds.chunks {
-		sb.WriteString(fmt.Sprintf("[%v]", ck))
+		cch := filterSlice(ds.channels, func(i int, v DSChannel) bool { return v.Chunk == ck })
+
+		lsc := "✓"
+		if ck.locked {
+			lsc = "╳"
+		}
+		sb.WriteString(fmt.Sprintf("[%s|%s|", lsc, dumpBitmap(&ck.ChannelMask)))
+		for i, r := range ck.String() {
+			for _, ch := range cch {
+				if ch.Pos == i {
+					sb.WriteString(fmt.Sprintf("{%d}", ch.ChannelNum))
+				}
+			}
+			sb.WriteRune(r)
+		}
+		for _, ch := range cch {
+			if ch.Pos == len(ck.String()) {
+				sb.WriteString(fmt.Sprintf("{%d}", ch.ChannelNum))
+			}
+		}
+		sb.WriteString("]")
 	}
 
 	return sb.String()
 }
 
 func (ds *DiffStream) splitChunk(lck *DSChunk, pos int, iss []*DSChunk) (rck *DSChunk) {
-	assert(pos < lck.Builder.Len(), "attempt to split chunk at end")
-	log.Debugf("splitting chunk %v: pos: %v iss: %v", lck, pos, iss)
+	assert(pos < lck.Builder.Len())
+
 	rck = &DSChunk{
 		ChannelMask: bitmap.New(ds.ChannelCount()),
 	}
 	copy(rck.ChannelMask.Data(false), lck.ChannelMask.Data(false))
+	rck.locked = lck.locked
 
 	if pos < lck.Builder.Len() {
 		rck.Builder.WriteString(lck.Builder.String()[pos:])
@@ -140,30 +178,33 @@ func (ds *DiffStream) splitChunk(lck *DSChunk, pos int, iss []*DSChunk) (rck *DS
 		for i := range ds.channels {
 			ch := &ds.channels[i]
 
-			if ch.Chunk != lck || ch.Pos < pos {
+			if ch.Chunk != lck {
 				continue
 			}
+
+			// this channel refers to the split chunk
 
 			// this channel refers to the right side of the
 			// chunk to be split
 
 			// first, exit the old chunk
-			ch.Chunk.ChannelMask.Set(ch.ChannelNum, true)
+			// if we've consumed any of it
+			if ch.Pos > 0 {
+				ch.Chunk.Exit(ch.ChannelNum)
+			}
 
 			// now, move to the right side chunk
-			ch.Chunk = rck
-			ch.Pos -= pos
+			if ch.Pos >= pos {
+				ch.Chunk = rck
+				ch.Pos -= pos
+			}
 		}
 
-		ncs := ds.chunks[:ick+1]
 		if iss != nil {
-			ncs = append(ncs, iss...)
+			ds.chunks = insertSlice(ds.chunks, ick+1, append(iss, rck))
+		} else {
+			ds.chunks = insertElement(ds.chunks, ick+1, rck)
 		}
-		ncs = append(ncs, rck)
-		ncs = append(ncs, ds.chunks[ick+1:]...)
-		log.Debugf("pre split chunks: %+v", ds.dumpChunks())
-		ds.chunks = ncs
-		log.Debugf("post split chunks: %+v", ds.dumpChunks())
 	}
 
 	return rck
@@ -187,12 +228,12 @@ func (ch *DSChannel) String() string {
 	var sb strings.Builder
 
 	for _, ck := range ch.Parent.chunks {
-		if ck.ChannelMask.Get(ch.ChannelNum) {
+		if ck == ch.Chunk {
+			sb.WriteString(ch.Chunk.String()[:ch.Pos])
+		} else if ck.ChannelMask.Get(ch.ChannelNum) {
 			sb.WriteString(ck.String())
 		}
 	}
-
-	sb.WriteString(ch.Chunk.String()[:ch.Pos])
 
 	return sb.String()
 }
@@ -219,41 +260,28 @@ func (ch *DSChannel) consumeRune(r rune) {
 
 	if nrck == nil && ch.canAppendToChunk() {
 		// no downstream matches, and we can write
-		cb, _ = ch.Chunk.Builder.WriteRune(r)
+		cb, _ = ch.Chunk.WriteRune(r)
 		ch.Pos += cb
 
 		return
 	}
 
-	log.Debugf("ch %d: %v", ch.ChannelNum, ds.dumpChunks())
-	log.Debugf("ch %d: not-happy %v: %s", ch.ChannelNum, ch, string(r))
-
 	if nrck != nil {
 		// there's a matching downstream rune in a chunk
 		// which might actually be this chunk
 
-		log.Debugf("matching downstream: %v (%v)", nrck, nrp)
-		log.Debugf("chunks: %v", ds.dumpChunks())
 		lck, rck := ch.exitChunk(nil)
 
 		if nrck == lck {
-			// we need to re-find the rune because
-			// we split it out from the
-			// current chunk into a new chunk
 			ch.Chunk = rck
 			ch.Pos = 0
 			nrck, nrp = ch.findNextRunePos(r)
+			ch.Chunk = nil
+			ch.Pos = -1
 		}
-
-		log.Debugf("nrck: %v nrp: %v", nrck, nrp)
 
 		if nrp == 0 {
 			// the match is at the start of the chunk
-			// we just need to exit the current chunk
-			// and set our current chunk pointer to the
-			// start of the new chunk
-
-			log.Debugf("hit nrp == 0 case")
 			ch.Chunk = nrck
 		} else {
 			ch.Chunk = ds.splitChunk(nrck, nrp, nil)
@@ -261,7 +289,7 @@ func (ch *DSChannel) consumeRune(r rune) {
 
 		cb, nr = ch.Chunk.PeekRune(0)
 
-		assert(nr == r, "chunk/rune mismatch")
+		assert(nr == r)
 
 		ch.Pos = cb
 
@@ -280,7 +308,7 @@ func (ch *DSChannel) consumeRune(r rune) {
 }
 
 func (ch *DSChannel) canAppendToChunk() bool {
-	return ch.EOC()
+	return !ch.Chunk.IsLocked() && ch.EOC()
 }
 
 func (ch *DSChannel) findNextRunePos(r rune) (nrck *DSChunk, nrp int) {
@@ -307,15 +335,18 @@ func (ch *DSChannel) findNextRunePos(r rune) (nrck *DSChunk, nrp int) {
 // its current chunk.
 func (ch *DSChannel) exitChunk(iss []*DSChunk) (lck *DSChunk, rck *DSChunk) {
 	ds := ch.Parent
-	log.Debugf("exiting chunk %v (%d)", ch.Chunk, ch.Pos)
 	lck = ch.Chunk
 
 	if !ch.EOC() {
 		// we're *not* at the end, so we need to split
 		rck = ds.splitChunk(ch.Chunk, ch.Pos, iss)
+	} else if iss != nil {
+		// we're at the end, but need to insert this chunk
+		ick := findElement(ds.chunks, lck)
+		ds.chunks = insertSlice(ds.chunks, ick+1, iss)
 	}
 
-	lck.ChannelMask.Set(ch.ChannelNum, true)
+	lck.Exit(ch.ChannelNum)
 
 	ch.Chunk = nil
 	ch.Pos = -1
