@@ -5,6 +5,7 @@
 package diffstream
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/labstack/gommon/log"
@@ -33,7 +34,13 @@ func Test_DiffStream(t *testing.T) {
 		t.Fail()
 	}
 
-	ds_0.Channel(0)
+	js, err := json.Marshal(ds_0)
+
+	if err != nil {
+		t.Error(err)
+	} else {
+		t.Logf("ds_0 JSON: %v", string(js))
+	}
 
 	ds_1 := New(len(td_1))
 
@@ -52,4 +59,12 @@ func Test_DiffStream(t *testing.T) {
 	}
 
 	t.Logf("final chunks: %v", ds_1.dumpChunks())
+
+	js, err = json.Marshal(ds_1)
+
+	if err != nil {
+		t.Error(err)
+	} else {
+		t.Logf("ds_1 JSON: %v", string(js))
+	}
 }

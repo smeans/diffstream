@@ -7,15 +7,15 @@
 package diffstream
 
 import (
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"sync"
-
-	"github.com/boljen/go-bitmap"
 )
 
 type DSChunk struct {
-	ChannelMask bitmap.Bitmap
+	ChannelMask *BitSet
 	Builder     strings.Builder
 	locked      bool
 }
@@ -54,7 +54,7 @@ func (ck *DSChunk) IsLocked() bool {
 }
 
 func (ck *DSChunk) Exit(c int) {
-	ck.ChannelMask.Set(c, true)
+	ck.ChannelMask.Set(c)
 	ck.locked = true
 }
 
@@ -66,6 +66,22 @@ func (ck *DSChunk) WriteRune(r rune) (n int, err error) {
 func (ck *DSChunk) WriteString(s string) (n int, err error) {
 	assert(!ck.IsLocked())
 	return ck.Builder.WriteString(s)
+}
+
+func (ck *DSChunk) MarshalJSON() (data []byte, err error) {
+	cm := make([]byte, base64.StdEncoding.EncodedLen(len(ck.ChannelMask.Bits)))
+	base64.StdEncoding.Encode(cm, ck.ChannelMask.Bits)
+	type _DSChunk struct {
+		ChannelMap string `json:"channel_map"`
+		Value      string `json:"value"`
+	}
+
+	dco := _DSChunk{
+		ChannelMap: string(cm),
+		Value:      ck.Builder.String(),
+	}
+
+	return json.Marshal(dco)
 }
 
 type DSChannel struct {
@@ -109,7 +125,7 @@ func New(cc int) (ds *DiffStream) {
 // Allocate a new chunk appropriate for this stream.
 func (ds *DiffStream) NewChunk(s string) (ck *DSChunk) {
 	ck = &DSChunk{
-		ChannelMask: bitmap.New(ds.ChannelCount()),
+		ChannelMask: NewBitSet(ds.ChannelCount()),
 	}
 
 	ck.Builder.WriteString(s)
@@ -124,6 +140,27 @@ func (ds *DiffStream) SplitChunk(lck *DSChunk, pos int) (rck *DSChunk) {
 	return ds.splitChunk(lck, pos, nil)
 }
 
+func (ds *DiffStream) MarshalJSON() (data []byte, err error) {
+	ds.lock.RLock()
+	defer ds.lock.RUnlock()
+
+	type _DiffStream struct {
+		ChannelCount int       `json:"channel_count"`
+		Chunks       []DSChunk `json:"chunks"`
+	}
+
+	dso := _DiffStream{
+		ChannelCount: len(ds.channels),
+		Chunks:       make([]DSChunk, len(ds.chunks)),
+	}
+
+	for i, ck := range ds.chunks {
+		dso.Chunks[i] = *ck
+	}
+
+	return json.Marshal(dso)
+}
+
 func (ds *DiffStream) dumpChunks() string {
 	var sb strings.Builder
 
@@ -134,7 +171,7 @@ func (ds *DiffStream) dumpChunks() string {
 		if ck.locked {
 			lsc = "╳"
 		}
-		sb.WriteString(fmt.Sprintf("[%s|%s|", lsc, dumpBitmap(&ck.ChannelMask)))
+		sb.WriteString(fmt.Sprintf("[%s|%+v|", lsc, ck.ChannelMask))
 		for i, r := range ck.String() {
 			for _, ch := range cch {
 				if ch.Pos == i {
@@ -158,9 +195,8 @@ func (ds *DiffStream) splitChunk(lck *DSChunk, pos int, iss []*DSChunk) (rck *DS
 	assert(pos < lck.Builder.Len())
 
 	rck = &DSChunk{
-		ChannelMask: bitmap.New(ds.ChannelCount()),
+		ChannelMask: lck.ChannelMask.Clone(),
 	}
-	copy(rck.ChannelMask.Data(false), lck.ChannelMask.Data(false))
 	rck.locked = lck.locked
 
 	if pos < lck.Builder.Len() {

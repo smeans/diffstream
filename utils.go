@@ -6,14 +6,29 @@ package diffstream
 
 import (
 	"errors"
-	"strings"
 
-	"github.com/boljen/go-bitmap"
+	"golang.org/x/exp/constraints"
 )
 
 func assert(f bool) {
 	if !f {
 		panic(errors.New("assertion failed"))
+	}
+}
+
+func max[T constraints.Ordered](a T, b T) T {
+	if a > b {
+		return a
+	} else {
+		return b
+	}
+}
+
+func min[T constraints.Ordered](a, b T) T {
+	if a < b {
+		return a
+	} else {
+		return b
 	}
 }
 
@@ -80,22 +95,4 @@ func insertSlice[T any](s []T, i int, v []T) []T {
 	}
 
 	return s
-}
-
-func dumpBitmap(b *bitmap.Bitmap) string {
-	var sb strings.Builder
-
-	for i := b.Len() - 1; i >= 0; i-- {
-		if b.Get(i) {
-			sb.WriteRune('1')
-		} else {
-			sb.WriteRune('0')
-		}
-
-		if i > 0 {
-			sb.WriteRune(' ')
-		}
-	}
-
-	return sb.String()
 }
