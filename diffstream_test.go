@@ -21,7 +21,7 @@ var td_1 = [...]string{
 	"The pen is not red.\n",
 	"The pen is blue.\n",
 	"The pen is not a pen.\n",
-	"This has nothing to do with 'The pen is red.'",
+	"This has nothing to do with 'The pen is red.'\n",
 	"The pen is not red.\n",
 	"The pen is blue.\n",
 }
@@ -57,7 +57,7 @@ func Test_DiffStream(t *testing.T) {
 
 			for _, r := range s {
 				ds_1.Channel(c).WriteRune(r)
-				time.Sleep(time.Millisecond * time.Duration(rand.Intn(300)))
+				time.Sleep(time.Millisecond * time.Duration(rand.Intn(30)))
 			}
 		}(i, s)
 	}
