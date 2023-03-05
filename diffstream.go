@@ -12,6 +12,9 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"unicode"
+
+	"github.com/labstack/gommon/log"
 )
 
 type DSChunk struct {
@@ -82,6 +85,34 @@ func (ck *DSChunk) MarshalJSON() (data []byte, err error) {
 	}
 
 	return json.Marshal(dco)
+}
+
+type RuneTokenType int
+
+const (
+	RTTWord RuneTokenType = iota
+	RTTLineSep
+	RTTSpace
+	RTTPunct
+	RTTSymbol
+	RTTOther
+)
+
+func runeTokenType(r rune) RuneTokenType {
+	switch {
+	case unicode.In(r, unicode.L, unicode.M, unicode.N):
+		return RTTWord
+	case unicode.In(r, unicode.Zl):
+		return RTTLineSep
+	case unicode.In(r, unicode.Z):
+		return RTTSpace
+	case unicode.In(r, unicode.P):
+		return RTTPunct
+	case unicode.In(r, unicode.S):
+		return RTTSymbol
+	}
+
+	return RTTOther
 }
 
 type DSChannel struct {
@@ -292,6 +323,11 @@ func (ch *DSChannel) consumeRune(r rune) {
 	// either way, we need to see if there is a matching
 	// rune further downstream
 
+	ct := ch.getCurrentToken(r)
+	if ct != "" {
+		log.Debugf("%d: current token %v%c", ch.ChannelNum, ct, r)
+	}
+
 	nrck, nrp := ch.findNextRunePos(r)
 
 	if nrck == nil && ch.canAppendToChunk() {
@@ -345,6 +381,30 @@ func (ch *DSChannel) consumeRune(r rune) {
 
 func (ch *DSChannel) canAppendToChunk() bool {
 	return !ch.Chunk.IsLocked() && ch.EOC()
+}
+
+func (ch *DSChannel) getCurrentToken(nr rune) string {
+	nrtt := runeTokenType(nr)
+
+	s := ch.Chunk.String()
+
+	ll := -1
+
+	for i, r := range s[:ch.Pos] {
+		if runeTokenType(r) == nrtt {
+			if ll < 0 {
+				ll = i
+			}
+		} else {
+			ll = -1
+		}
+	}
+
+	if ll >= 0 {
+		return s[ll:ch.Pos]
+	} else {
+		return ""
+	}
 }
 
 func (ch *DSChannel) findNextRunePos(r rune) (nrck *DSChunk, nrp int) {
