@@ -6,7 +6,10 @@ package diffstream
 
 import (
 	"encoding/json"
+	"math/rand"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/labstack/gommon/log"
 )
@@ -44,9 +47,22 @@ func Test_DiffStream(t *testing.T) {
 
 	ds_1 := New(len(td_1))
 
+	var wg sync.WaitGroup
+
 	for i, s := range td_1 {
-		ds_1.Channel(i).WriteString(s)
+		wg.Add(1)
+
+		go func(c int, s string) {
+			defer wg.Done()
+
+			for _, r := range s {
+				ds_1.Channel(c).WriteRune(r)
+				time.Sleep(time.Millisecond * time.Duration(rand.Intn(300)))
+			}
+		}(i, s)
 	}
+
+	wg.Wait()
 
 	t.Logf("test data: %+v", td_1)
 
