@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"unicode"
+
+	"github.com/labstack/gommon/log"
 )
 
 type DSChunk struct {
@@ -65,15 +67,21 @@ func (ck *DSChunk) findToken(t string, sp int) int {
 	tra := []rune(t)
 	lrt := RTTNone
 	mc := 0
+	lts := -1
 
 	for i, r := range s[sp:] {
 		if tra[mc] == r && (mc > 0 || lrt != tt) {
+			if mc == 0 {
+				lts = i
+			}
+
 			mc += 1
 			if mc >= len(tra) {
-				return sp + i - mc + 1
+				return sp + lts
 			}
 		} else {
 			mc = 0
+			lts = -1
 		}
 
 		lrt = runeTokenType(r)
@@ -184,11 +192,15 @@ func (ds *DiffStream) InsertChunkAfter(lck *DSChunk, nck *DSChunk) {
 	ds.insertChunkAfter(lck, nck)
 }
 
+func (ds *DiffStream) findChunk(ck *DSChunk) int {
+	return findElement(ds.chunks, ck)
+}
+
 func (ds *DiffStream) insertChunkAfter(lck *DSChunk, nck *DSChunk) {
 	if lck == nil {
 		ds.chunks = append([]*DSChunk{nck}, ds.chunks...)
 	} else {
-		ick := findElement(ds.chunks, lck)
+		ick := ds.findChunk(lck)
 		assert(ick >= 0)
 		ds.chunks = insertElement(ds.chunks, ick+1, nck)
 	}
@@ -199,13 +211,13 @@ func (ds *DiffStream) MarshalJSON() (data []byte, err error) {
 	defer ds.lock.RUnlock()
 
 	type _DiffStream struct {
-		ChannelCount int       `json:"channel_count"`
-		Chunks       []DSChunk `json:"chunks"`
+		Channels []DSChannel `json:"channels"`
+		Chunks   []DSChunk   `json:"chunks"`
 	}
 
 	dso := _DiffStream{
-		ChannelCount: len(ds.channels),
-		Chunks:       make([]DSChunk, len(ds.chunks)),
+		Channels: ds.channels,
+		Chunks:   make([]DSChunk, len(ds.chunks)),
 	}
 
 	for i, ck := range ds.chunks {
@@ -263,7 +275,7 @@ func (ds *DiffStream) splitChunk(lck *DSChunk, pos int) (rck *DSChunk) {
 
 	// now, need to fixup all channel references
 	// to this chunk
-	ick := findElement(ds.chunks, lck)
+	ick := ds.findChunk(lck)
 	if ick >= 0 {
 		for i := range ds.channels {
 			ch := &ds.channels[i]
@@ -351,7 +363,27 @@ func (ch *DSChannel) String() string {
 	return sb.String()
 }
 
+func (ch *DSChannel) MarshalJSON() (data []byte, err error) {
+	type _DSChannel struct {
+		ChannelNum int    `json:"channel_num"`
+		Token      string `json:"token"`
+		ChunkNum   int    `json:"chunk_num"`
+		Pos        int    `json:"pos"`
+	}
+
+	dco := _DSChannel{
+		ChannelNum: ch.ChannelNum,
+		Token:      ch.Token.String(),
+		ChunkNum:   ch.Parent.findChunk(ch.Chunk),
+		Pos:        ch.Pos,
+	}
+
+	return json.Marshal(dco)
+}
+
 func (ch *DSChannel) consumeRune(r rune) {
+	assert(r != unicode.ReplacementChar)
+
 	// empty token, append and return
 	if ch.Token.Len() <= 0 {
 		ch.TokenType = runeTokenType(r)
@@ -395,7 +427,6 @@ func (ch *DSChannel) flushToken() {
 		_, lck := ch.exitChunk()
 		nck, np = ch.Parent.findNextToken(t, lck, 0)
 
-		assert(nck == lck)
 		assert(np > 0)
 		rck := ds.splitChunk(lck, np)
 		ch.enterChunk(rck, t)
@@ -472,6 +503,9 @@ func (ch *DSChannel) enterChunk(ck *DSChunk, t string) {
 	assert(ch.Chunk == nil)
 	assert(ch.Pos == -1)
 	assert(ck != nil)
+	if strings.Index(ck.String(), t) != 0 {
+		log.Errorf("enterChunk ck: '%v' t: '%v'", ck.String(), t)
+	}
 	assert(strings.Index(ck.String(), t) == 0)
 
 	ch.Chunk = ck
